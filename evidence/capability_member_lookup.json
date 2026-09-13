@@ -1,0 +1,225 @@
+{
+  "schema_version": "1.0.0",
+  "capability_id": "apexcore.member.get_savings_balance",
+  "name": "ApexCore Member Savings Balance Inquiry",
+  "version": "1.0.0",
+  "description": "Navigates ApexCore banking servicing portal to retrieve primary savings account balance for a given member ID.",
+  "target_app": "ApexCore Banking Servicing Console",
+  "entry_point_url": "http://127.0.0.1:8092/apexcore",
+  "inputs": {
+    "member_id": {
+      "name": "member_id",
+      "type": "string",
+      "description": "Unique bank member account identifier (e.g. MEM-7701)",
+      "required": true,
+      "default": null,
+      "example": "MEM-7701"
+    }
+  },
+  "outputs": {
+    "savings_balance": {
+      "name": "savings_balance",
+      "type": "string",
+      "description": "Current ledger balance for the member's primary savings account",
+      "target_locator": null,
+      "extract_attribute": "inner_text",
+      "regex_pattern": null
+    },
+    "member_id": {
+      "name": "member_id",
+      "type": "string",
+      "description": "Echoed member identifier for verification",
+      "target_locator": null,
+      "extract_attribute": "value",
+      "regex_pattern": null
+    }
+  },
+  "success_checkpoints": [
+    {
+      "assertion_type": "url_contains",
+      "expected_value": "/apexcore/member/detail",
+      "target": null
+    },
+    {
+      "assertion_type": "text_contains",
+      "expected_value": "Primary Savings Balance",
+      "target": null
+    }
+  ],
+  "business_outcomes": [
+    {
+      "outcome_code": "MEMBER_NOT_FOUND",
+      "description": "Member identifier does not exist in the institutional core database",
+      "detection_locator": {
+        "primary": {
+          "strategy": "ax_role_name",
+          "value": "alert",
+          "role": "alert",
+          "name": null,
+          "parent_context": null,
+          "column_header": null,
+          "row_match": null
+        },
+        "fallbacks": [
+          {
+            "strategy": "text_anchor",
+            "value": "AC-404: Member Record",
+            "role": null,
+            "name": null,
+            "parent_context": null,
+            "column_header": null,
+            "row_match": null
+          },
+          {
+            "strategy": "css_selector",
+            "value": ".error-panel",
+            "role": null,
+            "name": null,
+            "parent_context": null,
+            "column_header": null,
+            "row_match": null
+          }
+        ],
+        "robustness_rationale": "Accessibility alert role triggers whenever the core returns error banners."
+      },
+      "text_pattern": "AC-404: Member Record.*not found",
+      "mapped_return_status": "business_outcome"
+    }
+  ],
+  "steps": [
+    {
+      "step_id": "step_1_input_member_id",
+      "description": "Enter the target member identifier into the inquiry lookup form",
+      "action": "fill",
+      "target": {
+        "primary": {
+          "strategy": "ax_role_name",
+          "value": "Member ID",
+          "role": "textbox",
+          "name": "Member ID",
+          "parent_context": null,
+          "column_header": null,
+          "row_match": null
+        },
+        "fallbacks": [
+          {
+            "strategy": "css_selector",
+            "value": "input[name*='txtMemberId']",
+            "role": null,
+            "name": null,
+            "parent_context": null,
+            "column_header": null,
+            "row_match": null
+          },
+          {
+            "strategy": "xpath",
+            "value": "//input[contains(@name, 'txtMemberId')]",
+            "role": null,
+            "name": null,
+            "parent_context": null,
+            "column_header": null,
+            "row_match": null
+          }
+        ],
+        "robustness_rationale": "Targeting the input by Accessibility role 'textbox' and label 'Member ID' avoids breakage when ASP.NET dynamic IDs (ctl00$MainContent$txtMemberId) change across framework updates."
+      },
+      "value_template": "{{inputs.member_id}}",
+      "risk_level": "safe_reversible",
+      "timeout_ms": 5000,
+      "checkpoint_assertion": "element_visible",
+      "known_recoveries": []
+    },
+    {
+      "step_id": "step_2_submit_inquiry",
+      "description": "Trigger the member search operation",
+      "action": "click",
+      "target": {
+        "primary": {
+          "strategy": "ax_role_name",
+          "value": "Execute Inquiry",
+          "role": "button",
+          "name": "Execute Inquiry",
+          "parent_context": null,
+          "column_header": null,
+          "row_match": null
+        },
+        "fallbacks": [
+          {
+            "strategy": "text_anchor",
+            "value": "Execute Inquiry",
+            "role": null,
+            "name": null,
+            "parent_context": null,
+            "column_header": null,
+            "row_match": null
+          },
+          {
+            "strategy": "css_selector",
+            "value": "button[name*='btnSearch']",
+            "role": null,
+            "name": null,
+            "parent_context": null,
+            "column_header": null,
+            "row_match": null
+          }
+        ],
+        "robustness_rationale": "Semantic button targeting by accessible name 'Execute Inquiry' is immune to table re-layout and button styling changes."
+      },
+      "value_template": null,
+      "risk_level": "safe_reversible",
+      "timeout_ms": 8000,
+      "checkpoint_assertion": "url_contains:/apexcore/member",
+      "known_recoveries": []
+    },
+    {
+      "step_id": "step_3_extract_savings_balance",
+      "description": "Read the current primary savings account ledger balance from the positions grid",
+      "action": "extract",
+      "target": {
+        "primary": {
+          "strategy": "css_selector",
+          "value": "#lblPrimarySavingsBalance",
+          "role": null,
+          "name": null,
+          "parent_context": null,
+          "column_header": null,
+          "row_match": null
+        },
+        "fallbacks": [
+          {
+            "strategy": "table_cell",
+            "value": "td:nth-child(3)",
+            "role": null,
+            "name": null,
+            "parent_context": null,
+            "column_header": null,
+            "row_match": "Savings"
+          },
+          {
+            "strategy": "text_anchor",
+            "value": "Primary Savings Balance",
+            "role": null,
+            "name": null,
+            "parent_context": null,
+            "column_header": null,
+            "row_match": null
+          }
+        ],
+        "robustness_rationale": "Primary targets the dedicated balance summary label; fallback uses relational table cell matching for the row containing 'Savings', ensuring resilience against table restructuring."
+      },
+      "value_template": null,
+      "risk_level": "safe_reversible",
+      "timeout_ms": 5000,
+      "checkpoint_assertion": null,
+      "known_recoveries": []
+    }
+  ],
+  "created_at": "2026-09-13T22:34:24Z",
+  "created_by": "ComputerUseDiscoveryAgent/1.0",
+  "tags": [
+    "banking",
+    "servicing",
+    "inquiry",
+    "apexcore"
+  ]
+}
