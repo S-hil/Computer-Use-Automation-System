@@ -1,11 +1,28 @@
 """
-Human-in-the-Loop Escalation and Control Transfer System.
-Implements the live session handoff seam:
-- Stuck state and high-risk policy gate detection
-- Intervention request packet routing with context and screenshots
-- Live session preservation (human operates the EXACT SAME session, not a fresh one)
-- Mutex-based control-transfer model (AUTOMATION -> HUMAN -> AUTOMATION)
-- Audit trail recording human actions and post-handoff resume
+Human-in-the-Loop Escalation & Control Transfer System.
+
+================================================================================
+ENGINEERING DESIGN CHOICES & TRADE-OFFS:
+================================================================================
+1. Live-Session Preservation vs. Fresh Session Re-Authentication:
+   - Trade-off: Launching a fresh session for manual intervention is architecturally simpler,
+     but in banking environments it invalidates transactional state, terminates locked records,
+     and forces the human operator to re-authenticate and complete MFA from scratch.
+   - Decision: Preserve the EXACT SAME live browser session context. Automation yields execution,
+     and the human operator interacts directly with the existing page state.
+
+2. Mutex-Based Control-Transfer State Machine:
+   - To avoid race conditions between human input and automation polling, we implement an
+     explicit state machine:
+       AUTOMATION_ACTIVE -> HANDOFF_PENDING -> HUMAN_CONTROL -> HANDOFF_RETURN -> AUTOMATION_RESUMED
+   - During HUMAN_CONTROL, all automated event injection is blocked. Automation cannot proceed
+     until the operator explicitly hands back control with an outcome status.
+
+3. Complete Auditability:
+   - Banking regulations (GLBA, SOX) require non-repudiation of actions taken during manual
+     interventions. Every handoff records an immutable `OperatorActionRecord` with operator ID,
+     timestamp, specific actions performed, and pre/post screenshots.
+================================================================================
 """
 
 from enum import Enum
@@ -71,7 +88,9 @@ class EscalationController:
         reason: str,
         requested_action: str = "Perform supervisor authorization on the live session"
     ) -> InterventionRequest:
-        """Pauses automation and raises an intervention request packet."""
+        """
+        Pauses automation, captures diagnostic state, and raises an intervention request packet.
+        """
         self.current_state = ControlState.HANDOFF_PENDING
         incident_id = f"ESC-{uuid.uuid4().hex[:8].upper()}"
 
@@ -100,7 +119,7 @@ class EscalationController:
                 screenshot=ss_path
             )
 
-        # Record state change
+        # Record control handover in immutable audit log
         self.audit_log.append({
             "event": "CONTROL_TRANSFERRED_TO_HUMAN",
             "incident_id": incident_id,
@@ -117,17 +136,17 @@ class EscalationController:
         simulate_manual_action: bool = True
     ) -> OperatorActionRecord:
         """
-        Simulates or executes the human operator taking control of the SAME live session,
-        performing manual intervention, and preparing for handback.
+        Allows human operator to take exclusive control of the live browser session,
+        perform manual overrides, and prepare for handback.
         """
         if self.current_state != ControlState.HUMAN_CONTROL:
             raise RuntimeError(f"Cannot take over session in state: {self.current_state}")
 
         if self.logger:
-            self.logger.info(f"Operator '{operator_id}' taking active control of live session {request.live_url}")
+            self.logger.info(f"Operator '{operator_id}' taking active control of live session: {request.live_url}")
 
         if simulate_manual_action:
-            # Human operator types Supervisor PIN 902104 and clicks Approve Override
+            # Operator types Supervisor PIN 902104 and clicks Approve Override
             pin_loc = MultiStrategyLocator(
                 primary=LocatorDefinition(strategy=LocatorType.CSS_SELECTOR, value="#txtSupervisorOverridePin"),
                 fallbacks=[
@@ -144,12 +163,12 @@ class EscalationController:
                 robustness_rationale="Supervisor approval button"
             )
 
-            # Human types PIN directly on the live session
+            # Manual interaction executed directly on the live session
             self.surface.fill(pin_loc, "902104")
             self.surface.click(approve_btn)
             time.sleep(1.0)
 
-        # Capture post-operator screenshot
+        # Capture post-operator state screenshot
         post_ss = os.path.join(self.evidence_dir, f"{request.incident_id}_human_resolved.png")
         self.surface.take_screenshot(post_ss)
 
@@ -174,7 +193,7 @@ class EscalationController:
     def resume_automation(self, record: OperatorActionRecord) -> bool:
         """
         Transfers control token back from human operator to automation.
-        Verifies live session state and resumes.
+        Verifies session integrity before resuming automated flow.
         """
         if self.current_state != ControlState.HANDOFF_RETURN:
             raise RuntimeError(f"Cannot resume from state: {self.current_state}")

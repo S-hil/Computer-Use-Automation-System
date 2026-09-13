@@ -1,7 +1,34 @@
 """
 Playwright-based Web Surface Driver.
-Drives Chrome using Accessibility Tree inspection and Multi-Strategy Locators.
-Handles hostile legacy surfaces (nested tables, no test-ids, dynamic IDs).
+
+================================================================================
+ENGINEERING DESIGN CHOICES & TRADE-OFFS:
+================================================================================
+1. Semantic Accessibility Perception over Raw DOM:
+   - Trade-off: Inspecting raw DOM HTML gives complete source visibility, but in legacy
+     enterprise banking applications it floods LLM context with tens of thousands of tokens
+     of non-semantic table layouts (`<table cellpadding="3">`), script tags, and generated
+     framework markup.
+   - Decision: Perceive the surface through the Browser Accessibility Tree (via Playwright
+     `aria_snapshot` / CDP `Accessibility.getFullAXTree`). The AX tree strips styling noise,
+     normalizes nested table cells to semantic data rows, and exposes interactive controls
+     by their functional role and accessible name. Crucially, this representation is identical
+     to what native desktop screen-readers and OS automation frameworks perceive.
+
+2. Sequential Fallback Cascade:
+   - Trade-off: Single-point CSS or XPath selectors break whenever server-side form generation
+     updates IDs or wraps elements in new container divs.
+   - Decision: `find_robust_locator()` tries the primary Accessibility Role/Name first. If not
+     immediately found (e.g. during DOM transition), it falls back sequentially through text
+     anchors, relational table cells, and structural selectors. The exact strategy that
+     resolved the element is logged for telemetry and drift detection.
+
+3. Live Session Preservation for Escalation:
+   - Trade-off: Closing a blocked session and opening a new one is easier to manage, but kills
+     in-flight transactions, expires session tokens, and forces users to repeat MFA.
+   - Decision: Maintain a persistent browser context (`BrowserContext`) that can be paused,
+     transferred to an operator, and resumed in-place.
+================================================================================
 """
 
 import os
@@ -45,7 +72,7 @@ class PlaywrightSurfaceDriver(SurfaceDriver):
 
     def navigate(self, url: str) -> None:
         if not self.page:
-            raise RuntimeError("Browser not initialized")
+            raise RuntimeError("Browser instance has not been initialized.")
         self.page.goto(url, wait_until="domcontentloaded", timeout=15000)
         self.wait_for_idle(500)
 
@@ -53,7 +80,10 @@ class PlaywrightSurfaceDriver(SurfaceDriver):
         return self.page.url if self.page else ""
 
     def get_accessibility_snapshot(self) -> AXNode:
-        """Capture the semantic accessibility tree of the current page."""
+        """
+        Capture the semantic accessibility tree of the current page.
+        Prioritizes Playwright aria_snapshot, falling back to direct Chrome DevTools Protocol (CDP).
+        """
         try:
             aria_text = self.page.locator("body").aria_snapshot()
             return AXNode(
@@ -62,6 +92,7 @@ class PlaywrightSurfaceDriver(SurfaceDriver):
                 description=aria_text
             )
         except Exception:
+            # Fallback to direct CDP session
             try:
                 cdp = self.page.context.new_cdp_session(self.page)
                 tree = cdp.send("Accessibility.getFullAXTree")
@@ -78,7 +109,7 @@ class PlaywrightSurfaceDriver(SurfaceDriver):
                 return AXNode(role="document", name=self.page.title(), description="document")
 
     def _resolve_locator(self, loc_def: LocatorDefinition, timeout_ms: int = 2000) -> Optional[Locator]:
-        """Resolve a single LocatorDefinition to a Playwright Locator."""
+        """Resolve a single LocatorDefinition using Playwright's semantic and structural selectors."""
         try:
             if loc_def.strategy == LocatorType.AX_ROLE_NAME:
                 # Primary: Semantic Accessibility role & name
@@ -92,8 +123,7 @@ class PlaywrightSurfaceDriver(SurfaceDriver):
                 # Visible Text Anchor
                 loc = self.page.get_by_text(loc_def.value, exact=False)
             elif loc_def.strategy == LocatorType.TABLE_CELL:
-                # Structural Table Cell Relative Strategy
-                # E.g. find row matching row_match, then extract column
+                # Structural Table Cell Relative Strategy (handles legacy HTML tables without IDs)
                 if loc_def.row_match:
                     row = self.page.locator(f"tr:has-text('{loc_def.row_match}')")
                     if loc_def.column_header:
@@ -109,9 +139,8 @@ class PlaywrightSurfaceDriver(SurfaceDriver):
             else:
                 loc = self.page.locator(loc_def.value)
 
-            # Check if at least one matching element exists within short timeout
-            count = loc.count()
-            if count > 0 and loc.first.is_visible(timeout=timeout_ms):
+            # Confirm element is visible and interactable before returning
+            if loc.count() > 0 and loc.first.is_visible(timeout=timeout_ms):
                 return loc.first
             return None
         except Exception:
@@ -119,17 +148,19 @@ class PlaywrightSurfaceDriver(SurfaceDriver):
 
     def find_robust_locator(self, multi_locator: MultiStrategyLocator, timeout_ms: int = 5000) -> tuple[Locator, str]:
         """
-        Tries primary strategy first, then cycles through fallbacks until an element is matched.
-        Returns (Playwright Locator, strategy_name_used).
+        Executes cascading locator resolution:
+        1. Tries primary semantic locator (AX Role/Name).
+        2. If unresolvable within 500ms, cycles through declared fallbacks.
+        Returns resolved Playwright Locator and telemetry label of the strategy used.
         """
         deadline = time.time() + (timeout_ms / 1000.0)
         while time.time() < deadline:
-            # 1. Try Primary
+            # 1. Primary Strategy
             loc = self._resolve_locator(multi_locator.primary, timeout_ms=500)
             if loc:
                 return loc, f"primary:{multi_locator.primary.strategy.value}"
 
-            # 2. Try Fallbacks in declared sequence
+            # 2. Fallbacks in declared sequence
             for idx, fallback in enumerate(multi_locator.fallbacks):
                 loc = self._resolve_locator(fallback, timeout_ms=500)
                 if loc:
@@ -137,7 +168,6 @@ class PlaywrightSurfaceDriver(SurfaceDriver):
 
             time.sleep(0.2)
 
-        # Final attempt with primary to raise the informative error
         primary_def = multi_locator.primary
         raise TimeoutError(
             f"Failed to find element using primary ({primary_def.strategy.value}='{primary_def.value}') "
